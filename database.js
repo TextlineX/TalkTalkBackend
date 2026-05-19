@@ -290,7 +290,11 @@ module.exports.getClassify = async function getClassify() {
       isCustom: true
     }));
 
-    const articleCategories = articleResult.rows;
+    const articleCategories = articleResult.rows.map(r => ({
+      name: r.name,
+      count: parseInt(r.count),
+      isCustom: false
+    }));
 
     return {
       status: 200,
