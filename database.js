@@ -1,276 +1,724 @@
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
 require('dotenv').config();
 
-const pool = mysql.createPool({
-    host: process.env.sql_host,
-    user: process.env.sql_user,
-    password: process.env.sql_password,
-    database: process.env.sql_database,
-    port: process.env.sql_port,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-    // 添加以下配置
-    connectTimeout: 60000, // 连接超时时间（毫秒）
+const pool = new Pool({
+  host: process.env.PG_HOST || 'textlinedb-textlinedatabase.i.aivencloud.com',
+  port: process.env.PG_PORT || 16904,
+  user: process.env.PG_USER || 'avnadmin',
+  password: process.env.PG_PASSWORD,
+  database: process.env.PG_DATABASE || 'defaultdb',
+  ssl: {
+    rejectUnauthorized: false
+  },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 60000,
 });
+
+const SALT_ROUNDS = 10;
 
 // 初始化表
 (async () => {
-    const maxRetries = 3;
-    let retryCount = 0;
-    
-    const initTables = async () => {
-        try {
-            const userTable = `CREATE TABLE IF NOT EXISTS user (
-                id INT(20) NOT NULL AUTO_INCREMENT,
-                NAME VARCHAR(12) NOT NULL,
-                sex VARCHAR(10) NOT NULL,
-                DATE VARCHAR(30) NOT NULL,
-                description VARCHAR(200) NOT NULL,
-                PASSWORD VARCHAR(20) NOT NULL,
-                avatar VARCHAR(200) NOT NULL,
-                banner VARCHAR(200) NOT NULL,
-                phone VARCHAR(20) NOT NULL,
-                email VARCHAR(20) NOT NULL,
-                PRIMARY KEY (id)
-            )`;
-    
-            // 原错误表名 'aritcle' 需要修正为 'article'
-            const articleTable = `CREATE TABLE IF NOT EXISTS article (
-                id INT(20) NOT NULL PRIMARY KEY AUTO_INCREMENT,
-                title VARCHAR(30) NOT NULL,
-                content VARCHAR(5000) NOT NULL,
-                label VARCHAR(20) NOT NULL,
-                DATE VARCHAR(20) NOT NULL,
-                user VARCHAR(20) NOT NULL,
-                cover varchar(200) NOT NULL
-            )`;
+  const client = await pool.connect();
+  try {
+    // 用户表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(12) NOT NULL UNIQUE,
+        sex VARCHAR(10) NOT NULL DEFAULT '默认',
+        date VARCHAR(30) NOT NULL,
+        description VARCHAR(200) NOT NULL DEFAULT ' ',
+        password VARCHAR(255) NOT NULL,
+        avatar VARCHAR(500) NOT NULL DEFAULT 'https://img.textline.top/file/1747010554838_avatar.webp',
+        banner VARCHAR(500) NOT NULL DEFAULT 'https://img.textline.top/file/1740911096111_rg2.jpg',
+        phone VARCHAR(20) NOT NULL DEFAULT '',
+        email VARCHAR(50) NOT NULL DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-            const adminTable = `CREATE TABLE IF NOT EXISTS admin (
-                id INT(20) NOT NULL PRIMARY KEY AUTO_INCREMENT, 
-                level INT(2) NOT NULL,
-                CONSTRAINT fv_admin FOREIGN KEY (level) REFERENCES user(id)
-    )`;
-    
-            const tables = [userTable, articleTable, adminTable];
-    
-            for (const table of tables) {
-                await pool.execute(table);
-            }
-    
-            console.log('表初始化完成');
-        } catch (err) {
-            console.log(`表初始化出错，原因为：${err}`);
-            if (retryCount < maxRetries) {
-                retryCount++;
-                console.log(`尝试第 ${retryCount} 次重新初始化表...`);
-                // 等待3秒后重试
-                await new Promise(resolve => setTimeout(resolve, 3000));
-                return initTables();
-            } else {
-                console.error('表初始化失败，已达到最大重试次数');
-                throw err;
-            }
-        }
-    };
+    // 文章表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS article (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(100) NOT NULL,
+        content TEXT NOT NULL,
+        label VARCHAR(50) NOT NULL,
+        date VARCHAR(30) NOT NULL,
+        username VARCHAR(20) NOT NULL,
+        cover VARCHAR(500) NOT NULL DEFAULT '',
+        view_count INTEGER DEFAULT 0,
+        like_count INTEGER DEFAULT 0,
+        collect_count INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
-    await initTables();
+    // 评论表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS comment (
+        id SERIAL PRIMARY KEY,
+        article_id INTEGER REFERENCES article(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        user_name VARCHAR(50) NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // 管理员表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS admin (
+        id SERIAL PRIMARY KEY,
+        level INTEGER NOT NULL DEFAULT 1,
+        user_id INTEGER REFERENCES users(id)
+      )
+    `);
+
+    // 点赞表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS article_like (
+        id SERIAL PRIMARY KEY,
+        article_id INTEGER REFERENCES article(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(article_id, user_id)
+      )
+    `);
+
+    // 收藏表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS article_collect (
+        id SERIAL PRIMARY KEY,
+        article_id INTEGER REFERENCES article(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(article_id, user_id)
+      )
+    `);
+
+    console.log('所有表初始化完成');
+  } catch (err) {
+    console.log(`表初始化出错，原因为：${err.message}`);
+  } finally {
+    client.release();
+  }
 })();
-//插入功能
-module.exports.addAritcle = async function addArticle(data) {
-    const { title, content, category, time, author } = data;
-    const sql = 'INSERT INTO article (title, content, label, DATE, user) VALUES (?, ?, ?, ?, ?)';
-    const values = [title, content, category, time, author];
 
-    try {
-        const [result] = await pool.execute(sql, values);
-        console.log('文章插入成功:', result);
-    } catch (err) {
-        console.log(`插入文章出错，原因为：${err}`);
-    }
+// ==================== 文章相关 ====================
+
+module.exports.addArticle = async function addArticle(data) {
+  const { title, content, category, time, author } = data;
+  const sql = `
+    INSERT INTO article (title, content, label, date, username)
+    VALUES ($1, $2, $3, $4, $5)
+    RETURNING id
+  `;
+  const values = [title, content, category, time, author];
+
+  try {
+    const result = await pool.query(sql, values);
+    return { success: true, message: '文章发布成功', articleId: result.rows[0].id };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
 };
 
+module.exports.getArticle = async function getArticle(data) {
+  const { current = 1, pageSize = 10 } = data || {};
+  const offset = current === 1 ? 0 : (current - 1) * pageSize;
+
+  try {
+    const sql = 'SELECT * FROM article ORDER BY id DESC LIMIT $1 OFFSET $2';
+    const result = await pool.query(sql, [pageSize, offset]);
+    const countResult = await pool.query('SELECT COUNT(*) as total FROM article');
+
+    return {
+      data: result.rows,
+      total: parseInt(countResult.rows[0].total),
+      current: current,
+      pageSize: pageSize
+    };
+  } catch (err) {
+    throw err;
+  }
+};
+
+module.exports.getContent = async function getContent(data) {
+  const { id } = data;
+
+  try {
+    await pool.query('UPDATE article SET view_count = view_count + 1 WHERE id = $1', [id]);
+    const sql = 'SELECT * FROM article WHERE id = $1';
+    const result = await pool.query(sql, [id]);
+
+    return {
+      status: 200,
+      success: true,
+      data: result.rows
+    };
+  } catch (err) {
+    return { status: 500, success: false, message: err.message };
+  }
+};
+
+module.exports.getArticleById = async function getArticleById(data) {
+  const { id } = data;
+
+  try {
+    const sql = 'SELECT * FROM article WHERE id = $1';
+    const result = await pool.query(sql, [id]);
+
+    if (result.rows.length === 0) {
+      return { success: false, message: '文章不存在' };
+    }
+
+    return { success: true, data: result.rows[0] };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.updateArticle = async function updateArticle(data) {
+  const { id, title, content, label } = data;
+
+  try {
+    const sql = `
+      UPDATE article
+      SET title = $1, content = $2, label = $3
+      WHERE id = $4
+      RETURNING id
+    `;
+    const result = await pool.query(sql, [title, content, label, id]);
+
+    if (result.rows.length === 0) {
+      return { success: false, message: '文章不存在' };
+    }
+
+    return { success: true, message: '文章更新成功' };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.deleteArticle = async function deleteArticle(data) {
+  const { id, username } = data;
+
+  try {
+    const checkSql = 'SELECT username FROM article WHERE id = $1';
+    const checkResult = await pool.query(checkSql, [id]);
+
+    if (checkResult.rows.length === 0) {
+      return { success: false, message: '文章不存在' };
+    }
+
+    if (checkResult.rows[0].username !== username) {
+      return { success: false, message: '无权限删除' };
+    }
+
+    await pool.query('DELETE FROM article WHERE id = $1', [id]);
+    return { success: true, message: '文章删除成功' };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.searchArticle = async function searchArticle(data) {
+  const { keyword, current = 1, pageSize = 10 } = data;
+  const offset = (current - 1) * pageSize;
+
+  try {
+    const sql = `
+      SELECT * FROM article
+      WHERE title ILIKE $1 OR content ILIKE $1
+      ORDER BY id DESC
+      LIMIT $2 OFFSET $3
+    `;
+    const result = await pool.query(sql, [`%${keyword}%`, pageSize, offset]);
+    const countSql = `
+      SELECT COUNT(*) as total FROM article
+      WHERE title ILIKE $1 OR content ILIKE $1
+    `;
+    const countResult = await pool.query(countSql, [`%${keyword}%`]);
+
+    return {
+      success: true,
+      data: result.rows,
+      total: parseInt(countResult.rows[0].total)
+    };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.getClassify = async function getClassify() {
+  try {
+    const sql = `
+      SELECT DISTINCT label, COUNT(*) as count
+      FROM article
+      WHERE label IS NOT NULL AND label != ''
+      GROUP BY label
+      ORDER BY count DESC
+    `;
+    const result = await pool.query(sql);
+
+    return {
+      status: 200,
+      success: true,
+      data: result.rows
+    };
+  } catch (err) {
+    return { status: 500, success: false, message: err.message };
+  }
+};
+
+module.exports.getTagArticle = async function getTagArticle(data) {
+  const { tag, current = 1, pageSize = 10 } = data;
+  const offset = (current - 1) * pageSize;
+
+  try {
+    const sql = `
+      SELECT * FROM article WHERE label = $1
+      ORDER BY id DESC
+      LIMIT $2 OFFSET $3
+    `;
+    const result = await pool.query(sql, [tag, pageSize, offset]);
+
+    return {
+      status: 200,
+      success: true,
+      data: result.rows
+    };
+  } catch (err) {
+    return { status: 500, success: false, message: err.message };
+  }
+};
+
+// ==================== 用户相关（密码加密） ====================
+
 module.exports.addUser = async function addUser(data) {
-    const {name, date, password, sex, description, avatar, banner, phone, email} = data;
+  const { name, date, password, sex, description, avatar, banner, phone, email } = data;
 
-    try {
-        const checkUserSql = `SELECT * FROM user WHERE NAME = ?`;
-        const [existingUsers] = await pool.execute(checkUserSql, [name]);
+  try {
+    const checkUserSql = 'SELECT * FROM users WHERE name = $1';
+    const existingUsers = await pool.query(checkUserSql, [name]);
 
-        if (existingUsers.length > 0) {
-            console.log('用户已存在');
-            return {
-                status:409,
-                success: false,
-                message: '用户已存在',
-            };
-        }
-
-        const insertUserSql = 'INSERT INTO user (NAME, DATE, PASSWORD, sex, description, avatar, banner, phone, email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)';
-        const values = [name, date, password, sex, description, avatar, banner, phone, email];
-        const [insertResult] = await pool.execute(insertUserSql, values);
-        
-        console.log('用户插入成功:', insertResult);
-        return { // 插入成功后返回统一格式的对象
-            success: true,
-            message: '用户注册成功',
-            userId: insertResult.insertId 
-        };
-
-    } catch (err) {
-        console.log(`处理用户注册出错，原因为：${err}`);
-        return { // 发生错误时返回统一格式的对象
-            success: false,
-            message: '用户注册失败：' + err.message 
-        }
+    if (existingUsers.rows.length > 0) {
+      return { status: 409, success: false, message: '用户已存在' };
     }
-}
-//获取表内容
-module.exports.userSelect = async function userSelect(data){
-    const {username, password} = data;
-    const us = `select * from user where NAME='${username}'`
-    const us_rs = await pool.execute(us);
-    try {
-        if (us_rs[0].length === 0) {
-            return ({
-                status: 401,
-                success: false
-            })
-        } else if (us_rs[0].length === 2) {
-            return ({
-                status: 401,
-                success:false
-            })
-        } else {
-            const sql = `select * from user where NAME='${username}' and PASSWORD='${password}'`
-            const sql_db = await pool.execute(sql)
-            const ck = sql_db[0][0]
-            const sql2 = `select * from user where NAME='${username}'`
-            const sql_db2 = await pool.execute(sql2)
-            const ck2 = sql_db2[0][0]
 
-            if (ck === undefined   ) {
-                return ({
-                    status: 401,
-                    success: false,
-                    message: '密码错误'
-                })
-            } else{
-                return ({
-                    status: 200,
-                    success: true,
-                    message: '登录成功',
-                    data: ck2
-                })
-            }
-        }
-    } catch (err) {
-        console.log(`查询出错，原因为：${err}`);
-    }
-}
+    // 密码加密
+    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
 
-module.exports.getArticle = async function getArticle(data){
-    let current = data.current
-    let pageSize = data.pageSize
-    if(current!==1){
-        current = (current-1)*pageSize
-    }
-    const sql = `select * from article limit ${current},${pageSize}`
-    try {
-        const [data] = await pool.execute(sql);
-        console.log('查询到文章数据');  // 添加日志
-        if (!data || data.length === 0) {
-            console.log('文章表为空');
-            return [];
-        }
-        return data;
-    }
-    catch (err) {
-        console.log(`获取文章出错，原因为：${err}`);
-        throw err;  // 抛出错误以便上层捕获
-    }
-}
+    const insertUserSql = `
+      INSERT INTO users (name, date, password, sex, description, avatar, banner, phone, email)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING id
+    `;
+    const values = [name, date, hashedPassword, sex || '默认', description || ' ', avatar || '', banner || '', phone || '', email || ''];
+    const result = await pool.query(insertUserSql, values);
 
-module.exports.getClassify = async function getClassify(){
-    const sql = `select DISTINCT label from article`
-    let res = await pool.execute(sql)
     return {
-        status: 200,
-        success: true,
-        data: res[0]
-    }
-}
+      success: true,
+      message: '用户注册成功',
+      userId: result.rows[0].id
+    };
+  } catch (err) {
+    return { success: false, message: '用户注册失败：' + err.message };
+  }
+};
 
-module.exports.getContent = async function getContent(data){
-    let id = data.id
-    const sql = `select * from article where id = ${id}`
-    let res = await pool.execute(sql)
+module.exports.userSelect = async function userSelect(data) {
+  const { username, password } = data;
+
+  try {
+    const sql = 'SELECT id, name, sex, date, description, avatar, banner, phone, email, password, created_at FROM users WHERE name = $1';
+    const result = await pool.query(sql, [username]);
+
+    if (result.rows.length === 0) {
+      return { status: 401, success: false, message: '用户不存在' };
+    }
+
+    const user = result.rows[0];
+
+    // 验证密码
+    const isValid = await bcrypt.compare(password, user.password);
+    if (!isValid) {
+      return { status: 401, success: false, message: '密码错误' };
+    }
+
+    // 返回用户信息（不含密码）
+    const { password: _, ...userInfo } = user;
     return {
-        status: 200,
-        success: true,
-        data: res[0]
-    }
-}
+      status: 200,
+      success: true,
+      message: '登录成功',
+      data: userInfo
+    };
+  } catch (err) {
+    return { status: 500, success: false, message: '服务器错误' };
+  }
+};
 
-module.exports.getUserContent = async function getUserContent(data){
-    let user = data.user;
-    const sql = `select * from article where user = '${user}'`
-    let res = await pool.execute(sql)
+module.exports.verifyPassword = async function verifyPassword(data) {
+  const { userId, oldPassword } = data;
+
+  try {
+    const sql = 'SELECT password FROM users WHERE id = $1';
+    const result = await pool.query(sql, [userId]);
+
+    if (result.rows.length === 0) {
+      return { success: false, message: '用户不存在' };
+    }
+
+    const isValid = await bcrypt.compare(oldPassword, result.rows[0].password);
+    return { success: true, valid: isValid };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.changePassword = async function changePassword(data) {
+  const { userId, newPassword } = data;
+
+  try {
+    const hashedPassword = await bcrypt.hash(newPassword, SALT_ROUNDS);
+    const sql = 'UPDATE users SET password = $1 WHERE id = $2 RETURNING id';
+    const result = await pool.query(sql, [hashedPassword, userId]);
+
+    if (result.rows.length === 0) {
+      return { success: false, message: '用户不存在' };
+    }
+
+    return { success: true, message: '密码修改成功' };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.getUserInfo = async function getUserInfo(data) {
+  const { userId } = data;
+
+  try {
+    const sql = 'SELECT id, name, sex, date, description, avatar, banner, phone, email, created_at FROM users WHERE id = $1';
+    const result = await pool.query(sql, [userId]);
+
+    if (result.rows.length === 0) {
+      return { success: false, message: '用户不存在' };
+    }
+
+    return { success: true, data: result.rows[0] };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.updateUser = async function updateUser(data) {
+  const { userId, sex, description, phone, email } = data;
+
+  try {
+    const sql = `
+      UPDATE users
+      SET sex = COALESCE($1, sex),
+          description = COALESCE($2, description),
+          phone = COALESCE($3, phone),
+          email = COALESCE($4, email)
+      WHERE id = $5
+      RETURNING id
+    `;
+    const result = await pool.query(sql, [sex, description, phone, email, userId]);
+
+    if (result.rows.length === 0) {
+      return { success: false, message: '用户不存在' };
+    }
+
+    return { success: true, message: '信息更新成功' };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.updateAvatar = async function updateAvatar(data) {
+  const { userId, avatar } = data;
+
+  try {
+    const sql = 'UPDATE users SET avatar = $1 WHERE id = $2 RETURNING id';
+    const result = await pool.query(sql, [avatar, userId]);
+
+    if (result.rows.length === 0) {
+      return { success: false, message: '用户不存在' };
+    }
+
+    return { success: true, message: '头像更新成功' };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.updateBanner = async function updateBanner(data) {
+  const { userId, banner } = data;
+
+  try {
+    const sql = 'UPDATE users SET banner = $1 WHERE id = $2 RETURNING id';
+    const result = await pool.query(sql, [banner, userId]);
+
+    if (result.rows.length === 0) {
+      return { success: false, message: '用户不存在' };
+    }
+
+    return { success: true, message: '背景更新成功' };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.getUserContent = async function getUserContent(data) {
+  const { user, current = 1, pageSize = 10 } = data;
+  const offset = (current - 1) * pageSize;
+
+  try {
+    const sql = `
+      SELECT * FROM article WHERE username = $1
+      ORDER BY id DESC
+      LIMIT $2 OFFSET $3
+    `;
+    const result = await pool.query(sql, [user, pageSize, offset]);
+    const countSql = 'SELECT COUNT(*) as total FROM article WHERE username = $1';
+    const countResult = await pool.query(countSql, [user]);
+
     return {
-        status: 200,
-        success: true,
-        data: res[0]
-    }
-}
+      success: true,
+      data: result.rows,
+      total: parseInt(countResult.rows[0].total)
+    };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
 
-module.exports.getTagArticle = async function getTagArticle(data){
-    let tag = data.tag
-    const sql = `select * from article where label = '${tag}'`
-    let res = await pool.execute(sql)
+// ==================== 评论相关 ====================
+
+module.exports.addComment = async function addComment(data) {
+  const { articleId, userId, userName, content } = data;
+
+  if (!content || content.trim() === '') {
+    return { success: false, message: '评论内容不能为空' };
+  }
+
+  try {
+    const sql = `
+      INSERT INTO comment (article_id, user_id, user_name, content)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+    `;
+    const result = await pool.query(sql, [articleId, userId, userName, content.trim()]);
+
     return {
-        status: 200,
-        success: true,
-        data: res[0]
+      success: true,
+      message: '评论成功',
+      commentId: result.rows[0].id
+    };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.getComments = async function getComments(data) {
+  const { articleId, current = 1, pageSize = 20 } = data;
+  const offset = (current - 1) * pageSize;
+
+  try {
+    const sql = `
+      SELECT c.*, u.avatar as user_avatar
+      FROM comment c
+      LEFT JOIN users u ON c.user_id = u.id
+      WHERE c.article_id = $1
+      ORDER BY c.created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+    const result = await pool.query(sql, [articleId, pageSize, offset]);
+
+    const countSql = 'SELECT COUNT(*) as total FROM comment WHERE article_id = $1';
+    const countResult = await pool.query(countSql, [articleId]);
+
+    return {
+      success: true,
+      data: result.rows,
+      total: parseInt(countResult.rows[0].total)
+    };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.deleteComment = async function deleteComment(data) {
+  const { commentId, userId } = data;
+
+  try {
+    // 检查是否是评论作者
+    const checkSql = 'SELECT user_id FROM comment WHERE id = $1';
+    const checkResult = await pool.query(checkSql, [commentId]);
+
+    if (checkResult.rows.length === 0) {
+      return { success: false, message: '评论不存在' };
     }
-}
 
-module.exports.admin = async  function admin(data){
-    let id = data.id
-    try {
-        const sql = `select * from admin where id = ${id}`
-        let db = await pool.execute(sql);
-        let dbb = await db[0]
-        let result = await dbb[0]
-        console.log(result)
-        if (result === undefined) {
-            return {
-                status: 401,
-                success: false,
-                message: '账号不存在'
-            }
-        } else {
-            return {
-                status: 200,
-                success: true,
-                message: '登录成功',
-            }
-        }
-    }catch (error){
-        console.log(error)
-        return {
-            status: 401,
-            success: false,
-            message: '账号不存在'
-        }
+    if (checkResult.rows[0].user_id !== userId) {
+      return { success: false, message: '无权限删除' };
     }
-}
 
+    await pool.query('DELETE FROM comment WHERE id = $1', [commentId]);
+    return { success: true, message: '评论已删除' };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
 
-// 在连接池创建后添加验证
-pool.getConnection()
-    .then(conn => {
-        console.log('成功连接到数据库');
-        conn.release()})
-    .catch(err => {
-        console.error('数据库连接失败:', err);
-    });
+// ==================== 点赞相关 ====================
+
+module.exports.toggleLike = async function toggleLike(data) {
+  const { articleId, userId } = data;
+
+  try {
+    const checkSql = 'SELECT id FROM article_like WHERE article_id = $1 AND user_id = $2';
+    const checkResult = await pool.query(checkSql, [articleId, userId]);
+
+    if (checkResult.rows.length > 0) {
+      await pool.query('DELETE FROM article_like WHERE article_id = $1 AND user_id = $2', [articleId, userId]);
+      await pool.query('UPDATE article SET like_count = GREATEST(0, like_count - 1) WHERE id = $1', [articleId]);
+      return { success: true, message: '已取消点赞', liked: false };
+    } else {
+      await pool.query('INSERT INTO article_like (article_id, user_id) VALUES ($1, $2)', [articleId, userId]);
+      await pool.query('UPDATE article SET like_count = like_count + 1 WHERE id = $1', [articleId]);
+      return { success: true, message: '点赞成功', liked: true };
+    }
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.checkLike = async function checkLike(data) {
+  const { articleId, userId } = data;
+
+  try {
+    const sql = 'SELECT id FROM article_like WHERE article_id = $1 AND user_id = $2';
+    const result = await pool.query(sql, [articleId, userId]);
+
+    return { success: true, liked: result.rows.length > 0 };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+// ==================== 收藏相关 ====================
+
+module.exports.toggleCollect = async function toggleCollect(data) {
+  const { articleId, userId } = data;
+
+  try {
+    const checkSql = 'SELECT id FROM article_collect WHERE article_id = $1 AND user_id = $2';
+    const checkResult = await pool.query(checkSql, [articleId, userId]);
+
+    if (checkResult.rows.length > 0) {
+      await pool.query('DELETE FROM article_collect WHERE article_id = $1 AND user_id = $2', [articleId, userId]);
+      await pool.query('UPDATE article SET collect_count = GREATEST(0, collect_count - 1) WHERE id = $1', [articleId]);
+      return { success: true, message: '已取消收藏', collected: false };
+    } else {
+      await pool.query('INSERT INTO article_collect (article_id, user_id) VALUES ($1, $2)', [articleId, userId]);
+      await pool.query('UPDATE article SET collect_count = collect_count + 1 WHERE id = $1', [articleId]);
+      return { success: true, message: '收藏成功', collected: true };
+    }
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.checkCollect = async function checkCollect(data) {
+  const { articleId, userId } = data;
+
+  try {
+    const sql = 'SELECT id FROM article_collect WHERE article_id = $1 AND user_id = $2';
+    const result = await pool.query(sql, [articleId, userId]);
+
+    return { success: true, collected: result.rows.length > 0 };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.getUserCollects = async function getUserCollects(data) {
+  const { userId, current = 1, pageSize = 10 } = data;
+  const offset = (current - 1) * pageSize;
+
+  try {
+    const sql = `
+      SELECT a.*, ac.created_at as collected_at
+      FROM article a
+      INNER JOIN article_collect ac ON a.id = ac.article_id
+      WHERE ac.user_id = $1
+      ORDER BY ac.created_at DESC
+      LIMIT $2 OFFSET $3
+    `;
+    const result = await pool.query(sql, [userId, pageSize, offset]);
+
+    return { success: true, data: result.rows };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+// ==================== 管理员相关 ====================
+
+module.exports.admin = async function admin(data) {
+  const { id } = data;
+
+  try {
+    const sql = 'SELECT * FROM admin WHERE user_id = $1';
+    const result = await pool.query(sql, [id]);
+
+    if (result.rows.length === 0) {
+      return { status: 401, success: false, message: '不是管理员' };
+    }
+
+    return { status: 200, success: true, message: '管理员验证成功' };
+  } catch (error) {
+    return { status: 401, success: false, message: '管理员验证失败' };
+  }
+};
+
+module.exports.getStatistics = async function getStatistics() {
+  try {
+    const userCount = await pool.query('SELECT COUNT(*) as count FROM users');
+    const articleCount = await pool.query('SELECT COUNT(*) as count FROM article');
+    const likeCount = await pool.query('SELECT COUNT(*) as count FROM article_like');
+    const collectCount = await pool.query('SELECT COUNT(*) as count FROM article_collect');
+    const commentCount = await pool.query('SELECT COUNT(*) as count FROM comment');
+
+    return {
+      success: true,
+      data: {
+        users: parseInt(userCount.rows[0].count),
+        articles: parseInt(articleCount.rows[0].count),
+        likes: parseInt(likeCount.rows[0].count),
+        collects: parseInt(collectCount.rows[0].count),
+        comments: parseInt(commentCount.rows[0].count)
+      }
+    };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+// ==================== 验证数据库连接 ====================
+
+pool.query('SELECT NOW()')
+  .then(() => {
+    console.log('成功连接到 PostgreSQL 数据库');
+  })
+  .catch(err => {
+    console.error('数据库连接失败:', err.message);
+  });
+
+module.exports.pool = pool;
