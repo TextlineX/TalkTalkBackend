@@ -105,6 +105,16 @@ app.get('/getClassify', async (req, res) => {
   res.json(result)
 })
 
+app.post('/addCategory', async (req, res) => {
+  const result = await dataB.addCategory(req.body)
+  res.json(result)
+})
+
+app.post('/deleteCategory', async (req, res) => {
+  const result = await dataB.deleteCategory(req.body)
+  res.json(result)
+})
+
 app.post('/getTagArticle', async (req, res) => {
   const result = await dataB.getTagArticle(req.body)
   res.json(result)

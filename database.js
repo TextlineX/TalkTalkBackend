@@ -99,6 +99,16 @@ const SALT_ROUNDS = 10;
       )
     `);
 
+    // 分类表
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS category (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(50) NOT NULL UNIQUE,
+        color VARCHAR(20) DEFAULT '#1890ff',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     console.log('所有表初始化完成');
   } catch (err) {
     console.log(`表初始化出错，原因为：${err.message}`);
@@ -255,22 +265,66 @@ module.exports.searchArticle = async function searchArticle(data) {
 
 module.exports.getClassify = async function getClassify() {
   try {
-    const sql = `
-      SELECT DISTINCT label, COUNT(*) as count
+    // 获取文章分类（按标签统计）
+    const articleSql = `
+      SELECT DISTINCT label as name, COUNT(*) as count
       FROM article
       WHERE label IS NOT NULL AND label != ''
       GROUP BY label
       ORDER BY count DESC
     `;
-    const result = await pool.query(sql);
+    const articleResult = await pool.query(articleSql);
+
+    // 获取自定义分类
+    const customSql = `
+      SELECT name, 0 as count
+      FROM category
+      ORDER BY id
+    `;
+    const customResult = await pool.query(customSql);
+
+    // 合并结果
+    const customCategories = customResult.rows.map(c => ({
+      name: c.name,
+      count: 0,
+      isCustom: true
+    }));
+
+    const articleCategories = articleResult.rows;
 
     return {
       status: 200,
       success: true,
-      data: result.rows
+      data: [...customCategories, ...articleCategories]
     };
   } catch (err) {
     return { status: 500, success: false, message: err.message };
+  }
+};
+
+module.exports.addCategory = async function addCategory(data) {
+  const { name, color } = data;
+  try {
+    const sql = `
+      INSERT INTO category (name, color)
+      VALUES ($1, $2)
+      ON CONFLICT (name) DO UPDATE SET color = $2
+      RETURNING id
+    `;
+    const result = await pool.query(sql, [name, color || '#1890ff']);
+    return { success: true, message: '分类创建成功', data: result.rows[0] };
+  } catch (err) {
+    return { success: false, message: err.message };
+  }
+};
+
+module.exports.deleteCategory = async function deleteCategory(data) {
+  const { id } = data;
+  try {
+    await pool.query('DELETE FROM category WHERE id = $1', [id]);
+    return { success: true, message: '分类删除成功' };
+  } catch (err) {
+    return { success: false, message: err.message };
   }
 };
 
