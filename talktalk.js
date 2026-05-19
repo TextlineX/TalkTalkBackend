@@ -25,8 +25,11 @@ app.use((req, res, next) => {
   next()
 })
 
-// 文件上传配置
-const uploadDir = path.join(__dirname, 'public', 'uploads')
+// 文件上传配置 (Vercel 使用 /tmp)
+const uploadDir = process.env.VERCEL
+  ? '/tmp/uploads'
+  : path.join(__dirname, 'public', 'uploads')
+
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true })
 }
